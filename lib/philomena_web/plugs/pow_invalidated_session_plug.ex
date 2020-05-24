@@ -30,6 +30,7 @@ defmodule PhilomenaWeb.PowInvalidatedSessionPlug do
   def init(:pow_session) do
     [
       fetch_token: &__MODULE__.client_store_fetch_session/1,
+      store_token: &__MODULE__.client_store_put_session/2,
       namespace: :session
     ]
   end
@@ -37,6 +38,7 @@ defmodule PhilomenaWeb.PowInvalidatedSessionPlug do
   def init(:pow_persistent_session) do
     [
       fetch_token: &__MODULE__.client_store_fetch_persistent_cookie/1,
+      store_token: &__MODULE__.client_store_put_persistent_cookie/2,
       namespace: :persistent_session
     ]
   end
@@ -94,7 +96,7 @@ defmodule PhilomenaWeb.PowInvalidatedSessionPlug do
 
     case fetch_fn.(conn) do
       ^old_token -> conn
-      _token -> put_cache(conn, {user, metadata}, old_token, opts)
+      new_token -> put_cache(conn, {user, new_token, metadata}, old_token, opts)
     end
   end
 
@@ -114,12 +116,17 @@ defmodule PhilomenaWeb.PowInvalidatedSessionPlug do
       :not_found ->
         conn
 
-      {user, metadata} ->
+      {user, token, metadata} ->
         metadata = Keyword.merge(metadata, conn.private[:pow_session_metadata] || [])
 
         conn
         |> Conn.put_private(:pow_session_metadata, metadata)
         |> Plug.assign_current_user(user, config)
+        |> Conn.register_before_send(fn conn ->
+          store_fn = Keyword.fetch!(opts, :store_token)
+
+          store_fn.(conn, token)
+        end)
 
       user ->
         Plug.assign_current_user(conn, user, config)
@@ -142,6 +149,16 @@ defmodule PhilomenaWeb.PowInvalidatedSessionPlug do
   end
 
   @doc false
+  def client_store_put_session(conn, session_id) do
+    signed_session_id = Plug.sign_token(conn, @session_signing_salt, session_id)
+
+    conn
+    |> Conn.fetch_session()
+    |> Conn.put_session(@session_key, signed_session_id)
+    |> Conn.configure_session(renew: true)
+  end
+
+  @doc false
   def client_store_fetch_persistent_cookie(conn) do
     conn =
       conn
@@ -154,6 +171,22 @@ defmodule PhilomenaWeb.PowInvalidatedSessionPlug do
     else
       _any -> nil
     end
+  end
+
+  @doc false
+  def client_store_put_persistent_cookie(conn, token) do
+    signed_token = Plug.sign_token(conn, @persistent_cookie_signing_salt, token)
+    config       = Plug.fetch_config(conn)
+
+    cookie_opts =
+      config
+      |> Config.get(:persistent_session_cookie_opts, [])
+      |> Keyword.put_new(:max_age,  Integer.floor_div(PowPersistentSession.Plug.Base.ttl(config), 1000))
+      |> Keyword.put_new(:path, "/")
+
+    conn
+    |> Conn.fetch_cookies()
+    |> Conn.put_resp_cookie(@persistent_cookie_key, signed_token, cookie_opts)
   end
 
   defp invalidated_cache(conn, opts) do

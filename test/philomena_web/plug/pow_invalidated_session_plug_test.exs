@@ -123,6 +123,49 @@ defmodule PhilomenaWeb.PowInvalidatedSessionPlugTest do
     refute metadata[:inserted_at]
   end
 
+  test "call/2 with aborted requests", %{conn: init_conn, user: user} do
+    no_session_conn = prepare_persistent_session_conn(init_conn, user)
+
+    # This request succeeds and rolls the session, but is not received because
+    # the client aborted it
+    _t1 =
+      no_session_conn
+      |> init_plug(@config)
+      |> Conn.send_resp(200, "")
+
+    # This request succeeds and does nothing
+    t2 =
+      no_session_conn
+      |> init_plug(@config)
+      |> Conn.send_resp(200, "")
+
+    # This will work due to the invalidated session plug
+    attempt_1 =
+      init_conn
+      |> Test.recycle_cookies(t2)
+      |> init_plug(@config)
+      |> Conn.send_resp(200, "")
+
+    assert Pow.Plug.current_user(attempt_1)
+
+    # It will subsequently fail, and the user will be signed out after their
+    # session expires
+    init_conn
+    |> Test.recycle_cookies(attempt_1)
+    |> Session.do_delete(@config)
+    |> Conn.send_resp(200, "")
+
+    # Commenting this line causes the test to pass
+    :timer.sleep(@invalidated_ttl)
+
+    attempt_2 =
+      init_conn
+      |> Test.recycle_cookies(attempt_1)
+      |> init_plug(@config)
+      |> Conn.send_resp(200, "")
+
+    assert Pow.Plug.current_user(attempt_2)
+  end
   defp init_session_plug(conn) do
     conn
     |> Map.put(:secret_key_base, String.duplicate("abcdefghijklmnopqrstuvxyz0123456789", 2))
